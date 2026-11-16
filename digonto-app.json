@@ -1,0 +1,38 @@
+{
+  "slug": "digonto-images",
+  "name": "Digonto Images",
+  "version": "1.8.8",
+  "comment": "Photo editing with layers, selections, brushes, adjustments and filters",
+  "entry": "digonto_images.py",
+  "files": [
+    "digonto_images.py",
+    "digonto_ui.py",
+    "digonto_sides.py",
+    "imgkit",
+    "assets",
+    "requirements.txt",
+    "README.txt"
+  ],
+  "requirements": "requirements.txt",
+  "check": "import PySide6.QtWidgets, numpy, PIL; import imgkit.doc, imgkit.adjust, imgkit.filters, imgkit.canvas",
+  "needs_tk": false,
+  "apt": [
+    "libxcb-cursor0"
+  ],
+  "macos_min": 11,
+  "categories": "Graphics;Photography;",
+  "keywords": "photo;image;editor;layers;retouch;paint;filter;",
+  "wm_class": "digonto-images",
+  "mime": [
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/bmp",
+    "image/vnd.adobe.photoshop"
+  ],
+  "legacy": {
+    "linux": [],
+    "darwin": [],
+    "windows": []
+  }
+}
