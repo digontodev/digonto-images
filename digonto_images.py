@@ -413,6 +413,9 @@ class Main(QMainWindow):
             d.title = os.path.splitext(os.path.basename(path))[0]
         self.add_doc(d)
         ui.add_recent(SLUG, path)
+        fams = [L.text.get("font") for L in d.layers if getattr(L, "text", None)]
+        if any(not ui.font_installed(x) for x in fams):
+            QTimer.singleShot(150, lambda: ui.note_missing_fonts(self, fams))
         return d
 
     def save(self):
@@ -710,6 +713,8 @@ class Main(QMainWindow):
         L = d.layer()
         if L is None or not L.text:
             self.statusBar().showMessage("Select a text layer first.", 4000)
+            return
+        if not ui.warn_missing_font(self, L.text.get("font")):
             return
         dlg = dialogs.TextDialog(self, L.text)
         if dlg.exec():

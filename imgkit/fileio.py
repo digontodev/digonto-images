@@ -117,7 +117,7 @@ def _font_family(ps_name):
     for f in fams:
         if want and key(f).startswith(want):
             return f, bold, italic
-    return spaced or "Sans Serif", bold, italic
+    return spaced or "Sans Serif", bold, italic                  # not installed: the name as Photoshop wrote it
 
 
 def psd_text_spec(t, image):
