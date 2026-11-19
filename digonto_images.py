@@ -55,12 +55,21 @@ class Main(QMainWindow):
         self.options = OptionsBar(self.state)
         self.options._stable()
 
-        col = QWidget()
-        v = QVBoxLayout(col)
+        work = QWidget()
+        v = QVBoxLayout(work)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         v.addWidget(self.tabs)
         v.addWidget(self.canvas, 1)
+        self.start = ui.StartScreen(
+            "Photo editing with layers, selections and filters",
+            [("New picture", "new", self.new_dialog, True), ("Open …", "open", self.open_dialog, False)],
+            "or drop pictures here (JPG, PNG, PSD, WEBP …)", lambda: ui.recent_paths(SLUG), self.open_path)
+        from PySide6.QtWidgets import QStackedWidget
+        col = QStackedWidget()
+        col.addWidget(self.start)
+        col.addWidget(work)
+        self.centre = col
         self._toolbar()
         body = QWidget()
         bl = QHBoxLayout(body)          # tools sit under the header, next to the picture
@@ -96,6 +105,28 @@ class Main(QMainWindow):
     # ------------------------------------------------------------------ pieces
     def _toolbar(self):
         self.tool_bar = ToolsPanel(self.state, self)
+        # the Digonto file icons sit at the top of the tool column (same order as every Digonto program)
+        from PySide6.QtWidgets import QFrame, QToolButton
+        lay = self.tool_bar.widget().layout()
+        self.file_buttons = {}
+        items = [("new", "new", "New picture (Ctrl+N)", self.new_dialog), ("open", "open", "Open (Ctrl+O)", self.open_dialog),
+                 ("save", "save", "Save project (Ctrl+S)", self.save), ("export", "export", "Export picture (Ctrl+E)", self.export),
+                 ("print", "print", "Print (Ctrl+P)", self.print_doc)]
+        for k, (key, kind, tip, fn) in enumerate(items):
+            b = QToolButton()
+            b.setIcon(ui.line_icon(kind, 22))
+            b.setIconSize(QSize(22, 22))
+            b.setFixedSize(40, 36)
+            b.setToolTip(tip)
+            b.setAutoRaise(True)
+            b.setStyleSheet("QToolButton{border:none; border-radius:5px;} QToolButton:hover{background:#EFE7F5;}")
+            b.clicked.connect(lambda _=False, f=fn: f())
+            lay.insertWidget(k, b)
+            self.file_buttons[key] = b
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background:{ui.LINE}; margin: 3px 4px;")
+        lay.insertWidget(len(items), line)
 
     def _dock(self, title, widget, area=Qt.RightDockWidgetArea, scroll=True):
         d = QDockWidget(title, self.inner)
@@ -342,6 +373,13 @@ class Main(QMainWindow):
         on = self.cur_doc() is not None
         for a in self._doc_actions:
             a.setEnabled(on)
+        for k in ("save", "export", "print"):
+            self.file_buttons[k].setEnabled(on)
+        if on:
+            self.centre.setCurrentIndex(1)
+        else:
+            self.start.refresh()
+            self.centre.setCurrentIndex(0)
 
     def _state_changed(self, name):
         pass
@@ -413,6 +451,9 @@ class Main(QMainWindow):
             d.title = os.path.splitext(os.path.basename(path))[0]
         self.add_doc(d)
         ui.add_recent(SLUG, path)
+        fams = [L.text.get("font") for L in d.layers if getattr(L, "text", None)]
+        if any(not ui.font_installed(x) for x in fams):
+            QTimer.singleShot(150, lambda: ui.note_missing_fonts(self, fams))
         return d
 
     def save(self):
@@ -515,8 +556,14 @@ class Main(QMainWindow):
     def dragEnterEvent(self, ev):
         if ev.mimeData().hasUrls():
             ev.acceptProposedAction()
+            if self.centre.currentIndex() == 0:
+                self.start.set_dropping(True)
+
+    def dragLeaveEvent(self, ev):
+        self.start.set_dropping(False)
 
     def dropEvent(self, ev):
+        self.start.set_dropping(False)
         for u in ev.mimeData().urls():
             if u.isLocalFile():
                 self.open_path(u.toLocalFile())
@@ -710,6 +757,8 @@ class Main(QMainWindow):
         L = d.layer()
         if L is None or not L.text:
             self.statusBar().showMessage("Select a text layer first.", 4000)
+            return
+        if not ui.warn_missing_font(self, L.text.get("font")):
             return
         dlg = dialogs.TextDialog(self, L.text)
         if dlg.exec():
