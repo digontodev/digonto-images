@@ -64,6 +64,8 @@ def open_psd(path):
     d = Document(pd.width, pd.height, None)
     d.layers = []
     mixed = 0
+    heads = {}                                             # outer folder name -> group header (folders inside folders: flattened into the outer one)
+    prev_folder = None
     for l in pd.layers:
         a = np.asarray(l.image.convert("RGBA"))
         if a.size == 0:
@@ -85,7 +87,20 @@ def open_psd(path):
                 L.text["font_ps"] = l.text["font_ps"]
             if l.text.get("mixed"):
                 mixed += 1
+        folder = l.path[0] if getattr(l, "path", None) else None
+        if prev_folder is not None and folder != prev_folder:
+            d.layers.append(heads.pop(prev_folder))        # close the previous folder: its group goes on top of its layers
+        if folder is not None and folder not in heads:
+            import uuid
+            h = Layer(arr.new_image(1, 1), folder)
+            h.is_group, h.gid = True, uuid.uuid4().hex[:10]
+            heads[folder] = h
+        if folder is not None:
+            L.parent = heads[folder].gid
+        prev_folder = folder
         d.layers.append(L)
+    if prev_folder is not None and prev_folder in heads:
+        d.layers.append(heads.pop(prev_folder))
     if not d.layers:
         a = np.asarray(pd.composite.convert("RGBA")) if pd.composite is not None else np.zeros((pd.height, pd.width, 4), np.uint8)
         d.layers.append(Layer(arr.from_array(a), "Background"))
@@ -149,9 +164,10 @@ def save_psd(doc, path):
     layers = []
     from PySide6.QtCore import QRect
     from . import ops, render
+    names = {l.gid: l.name for l in doc.layers if l.is_group}
     for l in doc.layers:
-        if l.adj:
-            continue                      # adjustment layers are not written (they are inside the flattened preview)
+        if l.adj or l.is_group:
+            continue                      # adjustment layers are not written (they are inside the flattened preview); groups become folders
         if l._mask is not None and not l.style:
             # a real layer mask: Photoshop and GIMP can keep editing it
             r = l.rect()
@@ -164,6 +180,8 @@ def save_psd(doc, path):
             img = Image.fromarray(arr.to_array(ops._bake(l, r)), "RGBA")     # layer styles (and a mask with them) are baked in
             pl = PsdLayer(l.name, int(r.x()), int(r.y()), img, int(round(l.opacity * 255)), l.visible, BLEND_TO_PSD.get(l.blend, "norm"))
         pl.clip = bool(getattr(l, "clip", False))         # clipping mask stays a clipping mask in Photoshop
+        if l.parent in names:
+            pl.path = [names[l.parent]]                    # the group becomes a Photoshop folder
         if l.text and (l.text.get("text") or "").strip():
             try:                                           # Photoshop keeps the text editable
                 from .psd_textw import anchor_for, build_tysh
@@ -204,6 +222,9 @@ def save_pimg(doc, path):
             if l._mask is not None:
                 z.writestr(f"layers/{i}_mask.png", _png_bytes(l._mask))
                 entry["mask_file"] = f"layers/{i}_mask.png"
+            if l.smart and l._smart_src is not None:          # the original pixels of a smart object
+                z.writestr(f"layers/{i}_smart.png", _png_bytes(l._smart_src))
+                entry["smart_file"] = f"layers/{i}_smart.png"
             meta["layers"].append(entry)
         z.writestr("project.json", json.dumps(meta))
         z.writestr("preview.png", _png_bytes(doc.flat_image().scaled(256, 256, Qt.KeepAspectRatio, Qt.SmoothTransformation)))      # 1 = keep aspect
@@ -219,7 +240,11 @@ def open_pimg(path):
         for m in meta["layers"]:
             img = QImage.fromData(z.read(m["file"]), "PNG").convertToFormat(arr.PM)
             L = Layer(img)
-            L.set_meta({k: v for k, v in m.items() if k not in ("file", "mask_file")})
+            L.set_meta({k: v for k, v in m.items() if k not in ("file", "mask_file", "smart_file")})
+            if m.get("smart_file"):
+                L._smart_src = QImage.fromData(z.read(m["smart_file"]), "PNG").convertToFormat(arr.PM)
+            elif L.smart:
+                L.smart = None
             if m.get("mask_file"):
                 L._mask = QImage.fromData(z.read(m["mask_file"]), "PNG").convertToFormat(arr.PM)
             d.layers.append(L)

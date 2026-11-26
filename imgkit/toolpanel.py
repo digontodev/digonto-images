@@ -35,7 +35,7 @@ RETOUCH = [("Smudge", "R", {"tool": "smudge"}), ("Blur brush", "", {"tool": "blu
 GROUP_TOOLS = {"select": ("select", "quickselect"), "shape": ("shape",), "clone": ("clone", "heal", "spot"), "retouch": ("smudge", "blurbrush", "sharpenbrush", "dodge", "burn")}
 TOOLS = [("Move", "V", "move", None), ("Select", "", "select", SELECTS), ("Wand", "W", "wand", None), ("Brush", "B", "brush", None),
          ("Eraser", "E", "eraser", None), ("Clone", "", "clone", CLONES), ("Retouch", "", "retouch", RETOUCH), ("Fill", "K", "fill", None), ("Gradient", "G", "gradient", None), ("Picker", "I", "eyedropper", None),
-         ("Text", "T", "text", None), ("Shape", "", "shape", SHAPES), ("Crop", "C", "crop", None), ("Transform", "", "transform", None), ("Hand", "H", "hand", None), ("Zoom", "Z", "zoom", None)]
+         ("Pen", "P", "pen", None), ("Text", "T", "text", None), ("Shape", "", "shape", SHAPES), ("Crop", "C", "crop", None), ("Transform", "", "transform", None), ("Hand", "H", "hand", None), ("Zoom", "Z", "zoom", None)]
 STYLE = ("QPushButton{border:1px solid transparent; border-radius:5px; padding:0 2px; text-align:center;}"
          "QPushButton:hover{background:#EFE7F5;}"
          "QPushButton:checked{background:#FBDCE5; border:1px solid #C2395C;}")

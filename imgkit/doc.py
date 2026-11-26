@@ -17,7 +17,8 @@ _MODES = {
     "soft": QPainter.CompositionMode_SoftLight, "difference": QPainter.CompositionMode_Difference,
     "exclusion": QPainter.CompositionMode_Exclusion, "plus": QPainter.CompositionMode_Plus,
 }
-META = ("name", "x", "y", "opacity", "blend", "visible", "locked", "text", "style", "adj", "mask_on", "clip")
+META = ("name", "x", "y", "opacity", "blend", "visible", "locked", "text", "style", "adj", "mask_on", "clip",
+        "is_group", "gid", "parent", "collapsed", "smart")
 
 
 class Layer:
@@ -32,6 +33,11 @@ class Layer:
         self.opacity, self.blend, self.visible, self.locked = 1.0, "normal", True, False
         self.clip = False                    # clipping mask: only show where the layer below has pixels (Ctrl+Alt+G)
         self.text = None                     # dict for a text layer (see tools.render_text), else None
+        # layer groups (as in Photoshop): a group is a header layer just above its members (no pixels of its own)
+        self.is_group, self.gid, self.parent, self.collapsed = False, None, None, False
+        # smart object (as in Photoshop): the original pixels are kept (_smart_src) and every resize / rotate is made
+        # from them, so nothing is lost. smart = dict(sx, sy, ang) or None
+        self.smart, self._smart_src = None, None
 
     # while the mask is being edited every tool sees the mask as "the layer picture", so all tools work on masks
     @property
@@ -51,6 +57,7 @@ class Layer:
 
     def map_images(self, fn):
         """apply a geometry change (crop, scale, rotate...) to the picture and to its mask together"""
+        self.smart = None                    # the picture changed: it is a normal layer from now on
         self._image = fn(self._image)
         if self._mask is not None:
             self._mask = fn(self._mask)
@@ -79,6 +86,13 @@ class Layer:
         return self._small(self._mask, size) if self._mask is not None else None
 
 
+def _shifted(l, dx, dy):
+    """the same layer, moved (for drawing a group into a part-picture)"""
+    c = copy.copy(l)
+    c.x, c.y = l.x + dx, l.y + dy
+    return c
+
+
 class _Edit:
     def __init__(self, doc, label, layers, whole, pixels=True):
         self.doc, self.label, self.layers, self.whole, self.pixels = doc, label, layers, whole, pixels
@@ -88,6 +102,7 @@ class _Edit:
         return self
 
     def __exit__(self, *a):
+        self.doc.tidy_groups()
         self.doc.changed(None if self.pixels else QRect())
         return False
 
@@ -148,9 +163,35 @@ class Document:
         img = image if image is not None else arr.new_image(self.w, self.h)
         L = Layer(img, name or f"Layer {len(self.layers) + 1}", x, y)
         i = self.active + 1 if index is None else index
+        cur = self.layers[self.active] if index is None and 0 <= self.active < len(self.layers) else None
+        if cur is not None and cur.is_group:             # a group is selected: the new layer goes in on top of it
+            L.parent, i = cur.gid, self.active
+        elif cur is not None and cur.parent:             # a layer in a group: the new layer joins that group
+            L.parent = cur.parent
         self.layers.insert(i, L)
         self.active = i
         return L
+
+    def tidy_groups(self):
+        """members of a group always sit right below it, in their order (after any change to the layer list)"""
+        heads = {l.gid for l in self.layers if l.is_group}
+        if not heads and not any(l.parent for l in self.layers):
+            return
+        act = self.layers[self.active] if 0 <= self.active < len(self.layers) else None
+        for l in self.layers:
+            if l.parent and l.parent not in heads:
+                l.parent = None
+        out = []
+        for l in self.layers:
+            if l.parent and not l.is_group:
+                continue
+            if l.is_group:
+                out.extend(m for m in self.layers if m.parent == l.gid and not m.is_group)
+            out.append(l)
+        if [id(x) for x in out] != [id(x) for x in self.layers]:
+            self.layers[:] = out
+            if act in out:
+                self.active = out.index(act)
 
     # ---- history
     def _snapshot(self):
@@ -179,6 +220,9 @@ class Document:
     def _push(self, label, layers, whole):
         del self.history[self.pos:]
         before = self._snapshot()
+        if not whole and label != "Free transform":
+            for l in layers or []:
+                l.smart = None               # painting or a filter on a smart object turns it into a normal layer (rasterize)
         for l in (self.layers if whole else layers):
             l._image = l._image.copy()
             if l._mask is not None:
@@ -233,15 +277,50 @@ class Document:
         return self._merged
 
     def _draw(self, target, rect):
-        from . import render
         p = QPainter(target)
         p.setClipRect(rect)
         p.setCompositionMode(QPainter.CompositionMode_Source)
         p.fillRect(rect, Qt.transparent)
         p.setCompositionMode(QPainter.CompositionMode_SourceOver)
         p.end()
+        self.composite(target, self.layers, rect)
+
+    def composite(self, target, layers, rect, gid=None):
+        """draw layers (bottom first) into target inside rect. Groups: members are drawn together and the group's
+        opacity and blend mode are applied to them as one (normal + 100 % lets them mix with what is below)."""
+        from . import render
         base, alpha = None, None
-        for l in self.layers:
+        i, n = 0, len(layers)
+        while i < n:
+            l = layers[i]
+            if l.parent and l.parent != gid:
+                j = i
+                while j < n and layers[j].parent == l.parent:
+                    j += 1
+                head = layers[j] if j < n and layers[j].is_group and layers[j].gid == l.parent else None
+                members = layers[i:j]
+                if head is None:                         # members without their group: draw them normally
+                    self.composite(target, members, rect, l.parent)
+                elif head.visible and not getattr(head, "_hide", False):
+                    if head.blend == "normal" and head.opacity >= 0.999:
+                        self.composite(target, members, rect, l.parent)
+                    else:
+                        tmp = arr.new_image(rect.width(), rect.height())
+                        shifted = [_shifted(m, -rect.x(), -rect.y()) for m in members]
+                        self.composite(tmp, shifted, QRect(0, 0, rect.width(), rect.height()), l.parent)
+                        q = QPainter(target)
+                        q.setClipRect(rect)
+                        q.setOpacity(head.opacity)
+                        q.setCompositionMode(_MODES.get(head.blend, QPainter.CompositionMode_SourceOver))
+                        q.drawImage(rect.x(), rect.y(), tmp)
+                        q.end()
+                base, alpha = None, None
+                i = j + 1 if head is not None else j
+                continue
+            if l.is_group:                               # an empty group
+                i += 1
+                continue
+            i += 1
             shown = l.visible and not getattr(l, "_hide", False)
             if not l.clip:
                 base, alpha = (l if shown else None), None
@@ -249,7 +328,7 @@ class Document:
                     render.draw_layer(target, l, rect, _MODES)
                 continue
             # clipping mask: shown only where the base layer (the first normal layer below) has pixels
-            if l is self.layers[0]:                     # nothing below: drawn normally
+            if l is layers[0]:                          # nothing below: drawn normally
                 if shown:
                     render.draw_layer(target, l, rect, _MODES)
                 continue

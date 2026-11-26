@@ -85,6 +85,11 @@ def icon(key, size=32):
         p.drawLine(8, 24, 18, 14)
         p.setBrush(Qt.white); p.drawPolygon(QPolygonF([QPointF(5, 27), QPointF(8, 20), QPointF(12, 24)]))
         p.save(); p.translate(21, 11); p.rotate(45); p.setBrush(GREEN); p.drawRoundedRect(QRectF(-3, -8, 6, 16), 2, 2); p.restore()
+    elif key == "pen":
+        nib = QPainterPath(QPointF(16, 4)); nib.lineTo(24, 18); nib.lineTo(19, 26); nib.lineTo(13, 26); nib.lineTo(8, 18); nib.closeSubpath()
+        p.setBrush(LIGHT); p.drawPath(nib)
+        p.drawLine(QPointF(16, 4), QPointF(16, 16)); p.setBrush(INK); p.drawEllipse(QPointF(16, 17), 1.6, 1.6)
+        p.setBrush(Qt.NoBrush); p.drawLine(QPointF(12, 28), QPointF(20, 28))
     elif key == "text":
         f = QFont("Sans Serif"); f.setBold(True); f.setPixelSize(26)
         p.setFont(f); p.drawText(QRectF(0, 0, 32, 32), Qt.AlignCenter, "T")

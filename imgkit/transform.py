@@ -27,16 +27,19 @@ class TransformTool(Tool):
         d = c.doc
         L = d.layer() if d else None
         self.L = None
-        if L is None or L.locked or L.adj or not L.visible:
+        if L is None or L.locked or L.adj or L.is_group or not L.visible:
             if d is not None:
                 c.message.emit("Select an unlocked picture layer first.")
             return
         self.L = L
         self.oimg, self.omask, self.ox, self.oy = L._image, L._mask, L.x, L.y
-        self.w0, self.h0 = L._image.width(), L._image.height()
-        self.cx, self.cy = L.x + self.w0 / 2.0, L.y + self.h0 / 2.0
+        self.cx, self.cy = L.x + L._image.width() / 2.0, L.y + L._image.height() / 2.0
         self.sx = self.sy = 1.0
         self.ang = 0.0
+        if L.smart and L._smart_src is not None:      # smart object: start again from the original pixels
+            self.oimg, self.omask = L._smart_src, None
+            self.sx, self.sy, self.ang = L.smart["sx"], L.smart["sy"], L.smart["ang"]
+        self.w0, self.h0 = self.oimg.width(), self.oimg.height()
         self.dirty = False
         # while you drag, the layer is drawn quickly on top of the picture instead of being recomputed; the real transform is made once at the end
         self.k = min(1.0, 1800.0 / max(self.w0, self.h0))
@@ -73,9 +76,11 @@ class TransformTool(Tool):
         img, mask, x, y = L._image, L._mask, L.x, L.y
         self._restore()
         self.L = None
+        smart = dict(sx=self.sx, sy=self.sy, ang=self.ang) if L.smart else None
         with d.edit("Free transform", [L]):
             L._image, L._mask, L.x, L.y = img, mask, x, y
             L.text = None
+            L.smart = smart
 
     def cancel(self, c):
         if self.L is None:

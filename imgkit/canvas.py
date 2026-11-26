@@ -111,6 +111,14 @@ class Canvas(QWidget):
         if not L.visible:
             self.message.emit("This layer is hidden. Show it first.")
             return False
+        if L.is_group:
+            self.message.emit("A group has no pixels. Pick one of its layers to paint on.")
+            return False
+        if L.smart:
+            from PySide6.QtWidgets import QMessageBox
+            if QMessageBox.question(self, "Smart object", "This is a smart object. Painting turns it into a normal layer "
+                                    "(it can then lose quality when resized). Continue?") != QMessageBox.Yes:
+                return False
         if L.adj and not (L.edit_mask and L._mask is not None):
             self.message.emit("An adjustment layer has no pixels. Add a mask and paint on it, or edit it with a double-click.")
             return False

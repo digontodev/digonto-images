@@ -707,8 +707,140 @@ class TextTool(Tool):
         c.new_text_at(p)
 
 
+class PenTool(Tool):
+    """Pen (as in Photoshop): click = corner point, click and drag = smooth point, click the first point to close.
+    Enter = make a selection from the path, Backspace = remove the last point, Esc = clear the path.
+    The options bar has Selection, Fill, Stroke (with the brush size and front colour)."""
+    name = "pen"
+    cursor = Qt.CrossCursor
+
+    def __init__(self):
+        self.nodes = []          # [anchor, handle_in, handle_out] in picture coordinates
+        self.closed = False
+        self.drag = None
+        self.hov = None
+
+    def finish(self, c):
+        self.drag = None
+
+    def press(self, c, p, ev):
+        if self.closed:
+            self.nodes, self.closed = [], False
+        if len(self.nodes) > 1 and math.hypot(*(c.to_w(self.nodes[0][0]) - c.to_w(p)).toTuple()) < 9:
+            self.closed = True
+            self.drag = self.nodes[0]
+            c.update()
+            return
+        n = [QPointF(p), QPointF(p), QPointF(p)]
+        self.nodes.append(n)
+        self.drag = n
+        c.update()
+
+    def move(self, c, p, ev):
+        self.hov = QPointF(p)
+        if self.drag is not None and ev.buttons() & Qt.LeftButton:
+            a = self.drag[0]
+            self.drag[2] = QPointF(p)                                  # out handle follows the mouse
+            self.drag[1] = QPointF(2 * a.x() - p.x(), 2 * a.y() - p.y())   # in handle mirrored: a smooth curve
+        c.update()
+
+    def release(self, c, p, ev):
+        self.drag = None
+        c.update()
+
+    def path(self):
+        pa = QPainterPath()
+        if not self.nodes:
+            return pa
+        pa.moveTo(self.nodes[0][0])
+        segs = list(zip(self.nodes, self.nodes[1:]))
+        if self.closed:
+            segs.append((self.nodes[-1], self.nodes[0]))
+        for a, b in segs:
+            pa.cubicTo(a[2], b[1], b[0])
+        if self.closed:
+            pa.closeSubpath()
+        return pa
+
+    def key(self, c, ev):
+        if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.to_selection(c)
+            return True
+        if ev.key() == Qt.Key_Escape:
+            self.nodes, self.closed = [], False
+            c.update()
+            return True
+        if ev.key() == Qt.Key_Backspace and self.nodes:
+            self.nodes.pop()
+            self.closed = False
+            c.update()
+            return True
+        return False
+
+    def _ready(self, c):
+        if len(self.nodes) < 2:
+            c.message.emit("Draw a path first: click points (drag for curves).")
+            return False
+        return True
+
+    def to_selection(self, c):
+        if not self._ready(c):
+            return
+        new = Selection.from_path(self.path(), c.doc.w, c.doc.h, antialias=True)
+        if c.state.feather > 0:
+            new = new.feathered(c.state.feather)
+        c.combine_selection(new, "new")
+        c.update()
+
+    def fill(self, c):
+        if not self._ready(c):
+            return
+        sel = Selection.from_path(self.path(), c.doc.w, c.doc.h, antialias=True)
+        fill_mask(c, "Fill path", sel.mask, QColor(c.state.fg), c.state.opacity / 100.0)
+
+    def stroke(self, c):
+        if not self._ready(c) or not c.layer_ok():
+            return
+        L = c.doc.layer()
+        with c.doc.edit("Stroke path", [L]):
+            q = QPainter(L.image)
+            q.setRenderHint(QPainter.Antialiasing)
+            q.translate(-L.x, -L.y)
+            col = QColor(c.state.fg)
+            col.setAlphaF(c.state.opacity / 100.0)
+            q.setPen(QPen(col, max(1, c.state.size), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            q.setBrush(Qt.NoBrush)
+            q.drawPath(self.path())
+            q.end()
+
+    def overlay(self, c, painter):
+        if not self.nodes:
+            return
+        pa = self.path()
+        if not self.closed and self.hov is not None and self.drag is None:
+            last = self.nodes[-1]
+            pa.cubicTo(last[2], self.hov, self.hov)                    # where the next point would go
+        w = c.path_to_w(pa)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255), 3))
+        painter.drawPath(w)
+        painter.setPen(QPen(QColor("#2D6CDF"), 1.4))
+        painter.drawPath(w)
+        for k, (a, hi, ho) in enumerate(self.nodes):
+            aw, iw, ow = c.to_w(a), c.to_w(hi), c.to_w(ho)
+            if (ho - a).manhattanLength() > 0.5:
+                painter.setPen(QPen(QColor("#2D6CDF"), 1))
+                painter.drawLine(iw, ow)
+                painter.setBrush(QColor("#2D6CDF"))
+                painter.drawEllipse(iw, 2.5, 2.5)
+                painter.drawEllipse(ow, 2.5, 2.5)
+            painter.setPen(QPen(QColor("#2D6CDF"), 1))
+            painter.setBrush(QColor(255, 255, 255) if k else QColor("#2D6CDF"))
+            painter.drawRect(QRectF(aw.x() - 3.5, aw.y() - 3.5, 7, 7))
+
+
 TOOLS = {t.name: t for t in (MoveTool(), SelectTool(), WandTool(), BrushTool(), EraserTool(), FillTool(), GradientTool(), EyedropperTool(),
-                              TextTool(), ShapeTool(), CropTool(), HandTool(), ZoomTool())}
+                              TextTool(), ShapeTool(), CropTool(), HandTool(), ZoomTool(), PenTool())}
 from . import retouch as _rt          # noqa: E402  (clone, heal, smudge, ...)
 from . import transform as _tf         # noqa: E402
 for _t in (_tf.TransformTool(), _tf.QuickSelectTool(), _rt.CloneTool(), _rt.HealTool(), _rt.SpotHealTool(), _rt.SmudgeTool(), _rt.BlurBrush(), _rt.SharpenBrush(), _rt.DodgeTool(), _rt.BurnTool()):
