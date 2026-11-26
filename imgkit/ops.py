@@ -108,7 +108,7 @@ def duplicate_layer(doc):
         n = Layer(l._image.copy(), l.name + " copy", l.x, l.y)
         n.opacity, n.blend, n.visible = l.opacity, l.blend, l.visible
         n._mask = l._mask.copy() if l._mask is not None else None
-        n.mask_on, n.style, n.adj = l.mask_on, copy.deepcopy(l.style), copy.deepcopy(l.adj)
+        n.mask_on, n.style, n.adj, n.clip = l.mask_on, copy.deepcopy(l.style), copy.deepcopy(l.adj), l.clip
         n.text = dict(l.text) if l.text else None
         doc.layers.insert(doc.active + 1, n)
         doc.active += 1
@@ -162,6 +162,8 @@ def merge_down(doc):
             a = arr.to_array(out)
             res = adjlayers.apply(top.adj, a)
             k = np.full(a.shape[:2], top.opacity, np.float32)[..., None]
+            if top._mask is not None and top.mask_on:
+                k = k * render._region_array(top._mask, r, top.x, top.y)[..., :1]
             res = (a * (1 - k) + res * k).astype(np.uint8)
             res[..., 3] = a[..., 3]
             out = arr.from_array(res)
@@ -171,9 +173,12 @@ def merge_down(doc):
             mar = max(render.style_margin(low.style), render.style_margin(top.style)) if top.visible else render.style_margin(low.style)
             r = r.adjusted(-mar, -mar, mar, mar)
             out = arr.new_image(r.width(), r.height())
-            for l in (low, top):
-                if l.visible:
-                    render.draw_layer(out, _proxy(l, -r.x(), -r.y()), QRect(0, 0, r.width(), r.height()), _MODES)
+            whole = QRect(0, 0, r.width(), r.height())
+            if low.visible:
+                render.draw_layer(out, _proxy(low, -r.x(), -r.y()), whole, _MODES)
+            if top.visible:
+                alpha = render.base_alpha(_proxy(low, -r.x(), -r.y()), whole) if top.clip else None    # clipped: only inside the layer below
+                render.draw_layer(out, _proxy(top, -r.x(), -r.y()), whole, _MODES, clip_alpha=alpha)
             low._image, low._mask, low.edit_mask, low.style, low.text = out, None, False, None, None
             low.x, low.y = r.x(), r.y()
         low.opacity, low.blend, low.mask_on = 1.0, "normal", True
@@ -440,3 +445,21 @@ def merge_visible(doc):
         keep.insert(pos, n)
         doc.layers[:] = keep
         doc.active = keep.index(n)
+
+
+def toggle_clip(doc):
+    """clipping mask (Ctrl+Alt+G, as in Photoshop): the active layer only shows where the layer below has pixels"""
+    i = doc.active
+    l = doc.layer()
+    if l is None or i <= 0:
+        return False
+    with doc.edit("Release clipping mask" if l.clip else "Create clipping mask", [l], pixels=False):
+        l.clip = not l.clip
+    return True
+
+
+def duplicate_or_copy(doc):
+    """Ctrl+J as in Photoshop: with a selection a new layer from it, without one a copy of the whole layer"""
+    if doc.selection is not None and new_from_selection(doc, False):
+        return
+    duplicate_layer(doc)

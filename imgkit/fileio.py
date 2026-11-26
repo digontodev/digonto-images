@@ -72,6 +72,7 @@ def open_psd(path):
         L.opacity = max(0.0, min(1.0, l.opacity / 255.0))
         L.visible = bool(l.visible)
         L.blend = PSD_TO_BLEND.get(l.blend, "normal")
+        L.clip = bool(getattr(l, "clip", False))           # clipping mask from Photoshop
         if getattr(l, "mask", None) is not None:          # a real layer mask, editable like one made here
             L._mask = arr.from_mask(l.mask)
             L.mask_on = bool(l.mask_on)
@@ -162,6 +163,7 @@ def save_psd(doc, path):
             r = l.rect().adjusted(-mar, -mar, mar, mar)
             img = Image.fromarray(arr.to_array(ops._bake(l, r)), "RGBA")     # layer styles (and a mask with them) are baked in
             pl = PsdLayer(l.name, int(r.x()), int(r.y()), img, int(round(l.opacity * 255)), l.visible, BLEND_TO_PSD.get(l.blend, "norm"))
+        pl.clip = bool(getattr(l, "clip", False))         # clipping mask stays a clipping mask in Photoshop
         if l.text and (l.text.get("text") or "").strip():
             try:                                           # Photoshop keeps the text editable
                 from .psd_textw import anchor_for, build_tysh

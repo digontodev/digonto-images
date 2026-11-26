@@ -17,7 +17,7 @@ _MODES = {
     "soft": QPainter.CompositionMode_SoftLight, "difference": QPainter.CompositionMode_Difference,
     "exclusion": QPainter.CompositionMode_Exclusion, "plus": QPainter.CompositionMode_Plus,
 }
-META = ("name", "x", "y", "opacity", "blend", "visible", "locked", "text", "style", "adj", "mask_on")
+META = ("name", "x", "y", "opacity", "blend", "visible", "locked", "text", "style", "adj", "mask_on", "clip")
 
 
 class Layer:
@@ -30,6 +30,7 @@ class Layer:
         self.adj = None                      # adjustment layer: dict(kind, params); it changes everything below it
         self.name, self.x, self.y = name, x, y
         self.opacity, self.blend, self.visible, self.locked = 1.0, "normal", True, False
+        self.clip = False                    # clipping mask: only show where the layer below has pixels (Ctrl+Alt+G)
         self.text = None                     # dict for a text layer (see tools.render_text), else None
 
     # while the mask is being edited every tool sees the mask as "the layer picture", so all tools work on masks
@@ -239,9 +240,24 @@ class Document:
         p.fillRect(rect, Qt.transparent)
         p.setCompositionMode(QPainter.CompositionMode_SourceOver)
         p.end()
+        base, alpha = None, None
         for l in self.layers:
-            if l.visible and not getattr(l, "_hide", False):
-                render.draw_layer(target, l, rect, _MODES)
+            shown = l.visible and not getattr(l, "_hide", False)
+            if not l.clip:
+                base, alpha = (l if shown else None), None
+                if shown:
+                    render.draw_layer(target, l, rect, _MODES)
+                continue
+            # clipping mask: shown only where the base layer (the first normal layer below) has pixels
+            if l is self.layers[0]:                     # nothing below: drawn normally
+                if shown:
+                    render.draw_layer(target, l, rect, _MODES)
+                continue
+            if not shown or base is None or base.adj:
+                continue
+            if alpha is None:
+                alpha = render.base_alpha(base, rect)
+            render.draw_layer(target, l, rect, _MODES, clip_alpha=alpha)
 
     def flat_image(self, background=None):
         """for saving: merged, optionally on a solid background"""

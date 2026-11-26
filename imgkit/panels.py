@@ -305,6 +305,11 @@ class LayersPanel(QWidget):
         self.fx_btn.setToolTip("Layer style: shadow, glow, outline, colour overlay")
         self.fx_btn.clicked.connect(self._style)
         row2.addWidget(self.fx_btn)
+        self.clip_btn = QToolButton()
+        self.clip_btn.setText("↳ Clip")
+        self.clip_btn.setToolTip("Clipping mask (Ctrl+Alt+G): this layer only shows inside the layer below")
+        self.clip_btn.clicked.connect(lambda: self._do(ops.toggle_clip))
+        row2.addWidget(self.clip_btn)
         self.adj_btn = QToolButton()
         self.adj_btn.setText("Adjustment ▾")
         self.adj_btn.setPopupMode(QToolButton.InstantPopup)
@@ -385,7 +390,7 @@ class LayersPanel(QWidget):
         if d is not None:
             for i in range(len(d.layers) - 1, -1, -1):
                 L = d.layers[i]
-                it = QListWidgetItem(self._icon(L), ("◐  " if L.adj else "T  " if L.text else "") + L.name + ("  fx" if render.style_active(L.style) else "")
+                it = QListWidgetItem(self._icon(L), ("↳ " if getattr(L, "clip", False) else "") + ("◐  " if L.adj else "T  " if L.text else "") + L.name + ("  fx" if render.style_active(L.style) else "")
                                      + ("  🔒" if L.locked else ""))
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
                 it.setCheckState(Qt.Checked if L.visible else Qt.Unchecked)
