@@ -205,7 +205,7 @@ class Main(QMainWindow):
         # build the File menu in the right order by inserting before Exit
         first_exit = [a for a in fm.actions() if a.text() == "Exit"][0]
         for text, sc, fn, needs in (("Save project", "Ctrl+S", self.save, True), ("Save project as…", "Ctrl+Shift+S", self.save_as, True),
-                                    ("Export picture…", "Ctrl+E", self.export, True), ("Print…", "Ctrl+P", self.print_doc, True), ("Two sides on one page (ID card)…", "", self.two_sides, False), ("Close project", "Ctrl+W", lambda: self.close_tab(self.tabs.currentIndex()), True)):
+                                    ("Export picture…", "Ctrl+Alt+Shift+W", self.export, True), ("Print…", "Ctrl+P", self.print_doc, True), ("Two sides on one page (ID card)…", "", self.two_sides, False), ("Close project", "Ctrl+W", lambda: self.close_tab(self.tabs.currentIndex()), True)):
             a = QAction(text, self)
             a.setShortcut(sc)
             a.triggered.connect(lambda _=False, fn=fn: fn())
@@ -225,19 +225,21 @@ class Main(QMainWindow):
         clr = act(em, "Clear selected area", None, lambda: ops.clear_selection_pixels(self.cur_doc()))
         clr.setShortcuts([QKeySequence("Delete"), QKeySequence("Backspace")])      # the Mac "delete" key is Backspace
         act(em, "Fill with front colour", "Alt+Backspace", self.fill_front)
+        act(em, "Fill with back colour", "Ctrl+Backspace", self.fill_back)
         em.addSeparator()
-        act(em, "Layer via copy", "Ctrl+J", lambda: ops.new_from_selection(self.cur_doc(), False) or self._no_sel())
+        act(em, "Layer via copy (or duplicate layer)", "Ctrl+J", lambda: ops.duplicate_or_copy(self.cur_doc()))
         act(em, "Layer via cut", "Ctrl+Shift+J", lambda: ops.new_from_selection(self.cur_doc(), True) or self._no_sel())
         act(em, "Free transform", "Ctrl+T", lambda: (self.state.set(tool="transform"), self.canvas.set_tool("transform")) if self.state.tool != "transform" else self.canvas.set_tool("transform"))
         act(em, "Transform layer (numbers)…", None, self.transform)
         # Select
         sm = mb.addMenu("Select")
         act(sm, "All", "Ctrl+A", lambda: self.sel_set(lambda d: Selection.all(d.w, d.h), "Select all"))
-        act(sm, "None", "Ctrl+D", lambda: self.sel_set(lambda d: None, "Deselect"))
+        act(sm, "None", "Ctrl+D", lambda: self._deselect())
+        act(sm, "Reselect", "Ctrl+Shift+D", lambda: self._reselect())
         act(sm, "Inverse", "Ctrl+Shift+I", lambda: self.sel_set(lambda d: d.selection.inverted() if d.selection is not None else None, "Invert selection"))
         act(sm, "Colour range…", None, self.colour_range)
         sm.addSeparator()
-        act(sm, "Soft edge…", None, lambda: self.sel_num("Soft edge", "Radius (px)", 5, 1, 300, lambda s, n: s.feathered(n)))
+        act(sm, "Soft edge (feather)…", "Shift+F6", lambda: self.sel_num("Soft edge", "Radius (px)", 5, 1, 300, lambda s, n: s.feathered(n)))
         act(sm, "Grow…", None, lambda: self.sel_num("Grow", "Pixels", 5, 1, 200, lambda s, n: s.grown(n)))
         act(sm, "Shrink…", None, lambda: self.sel_num("Shrink", "Pixels", 5, 1, 200, lambda s, n: s.grown(-n)))
         act(sm, "Smooth…", None, lambda: self.sel_num("Smooth", "Radius (px)", 4, 1, 100, lambda s, n: s.smoothed(n)))
@@ -258,7 +260,12 @@ class Main(QMainWindow):
         act(lm, "New layer", "Ctrl+Shift+N", lambda: ops.add_layer(self.cur_doc()))
         act(lm, "Duplicate layer", None, lambda: ops.duplicate_layer(self.cur_doc()))
         act(lm, "Delete layer", None, lambda: ops.delete_layer(self.cur_doc()))
-        act(lm, "Merge down", "Ctrl+Shift+E", lambda: ops.merge_down(self.cur_doc()))
+        act(lm, "Merge down (or merge group)", "Ctrl+E", lambda: ops.merge_down(self.cur_doc()))
+        act(lm, "Convert to smart object", None, lambda: ops.to_smart(self.cur_doc()))
+        act(lm, "Rasterize layer", None, lambda: ops.rasterize(self.cur_doc()))
+        act(lm, "Group layers", "Ctrl+G", lambda: ops.group_layers(self.cur_doc()) or self.statusBar().showMessage("Groups inside groups are not possible yet", 3000))
+        act(lm, "Ungroup layers", "Ctrl+Shift+G", lambda: ops.ungroup(self.cur_doc()))
+        act(lm, "Create / release clipping mask", "Ctrl+Alt+G", lambda: ops.toggle_clip(self.cur_doc()) or self.statusBar().showMessage("The bottom layer can't be clipped", 3000))
         lm.addSeparator()
         mk = lm.addMenu("Layer mask")
         self._doc_actions.append(mk.menuAction())
@@ -275,7 +282,7 @@ class Main(QMainWindow):
         for kind, (nm, sp, _f) in adjlayers.KINDS.items():
             na.addAction(nm + ("…" if sp else ""), lambda kind=kind: self.layers._add_adj(kind))
         lm.addSeparator()
-        act(lm, "Merge visible", None, lambda: ops.merge_visible(self.cur_doc()))
+        act(lm, "Merge visible", "Ctrl+Shift+E", lambda: ops.merge_visible(self.cur_doc()))
         act(lm, "Stamp visible (new layer from everything)", "Ctrl+Alt+Shift+E", lambda: ops.stamp_visible(self.cur_doc()))
         act(lm, "Flatten picture", None, lambda: ops.flatten(self.cur_doc()))
         lm.addSeparator()
@@ -298,12 +305,12 @@ class Main(QMainWindow):
         act(am, "Vibrance…", None, dlg("Vibrance", [("amount", "Amount", -100, 100, 30)], lambda a, amount: adjust.vibrance(a, amount), False))
         act(am, "Temperature / Tint…", None, dlg("Temperature / Tint", [("temp", "Warm - cool", -100, 100, 0), ("tint", "Green - magenta", -100, 100, 0)],
                                                   lambda a, temp, tint: adjust.temperature(a, temp, tint)))
-        act(am, "Colour balance…", None, dlg("Colour balance", dialogs.COLOR_BALANCE, lambda a, **k: dialogs.color_balance_fn(a, **k)))
+        act(am, "Colour balance…", "Ctrl+B", dlg("Colour balance", dialogs.COLOR_BALANCE, lambda a, **k: dialogs.color_balance_fn(a, **k)))
         am.addSeparator()
         act(am, "Auto levels", None, lambda: self.quick("Auto levels", adjust.auto_levels))
         act(am, "Auto contrast", None, lambda: self.quick("Auto contrast", adjust.auto_contrast))
         act(am, "Invert", "Ctrl+I", lambda: self.quick("Invert", adjust.invert))
-        act(am, "Black and white", "Ctrl+Shift+U", lambda: self.quick("Black and white", adjust.desaturate))
+        act(am, "Black and white (desaturate)", "Ctrl+Shift+U", lambda: self.quick("Black and white", adjust.desaturate))
         act(am, "Threshold…", None, dlg("Threshold", [("level", "Level", 0, 255, 128)], lambda a, level: adjust.threshold(a, level)))
         act(am, "Posterize…", None, dlg("Posterize", [("n", "Levels", 2, 16, 4)], lambda a, n: adjust.posterize(a, n)))
         act(am, "Sepia…", None, dlg("Sepia", [("amount", "Amount", 0, 100, 100)], lambda a, amount: adjust.sepia(a, amount)))
@@ -351,6 +358,9 @@ class Main(QMainWindow):
                 b.setVisible(checked)
                 QSettings("Digonto", "Images").setValue("panel_" + t, "true" if checked else "false")
             a.toggled.connect(toggle)
+            ps_key = {"Layers": "F7", "Colour": "F6", "History": "Alt+F9"}.get(title)     # Photoshop's panel keys
+            if ps_key:
+                a.setShortcut(ps_key)
             wm.addAction(a)
         wm.addSeparator()
         wm.addAction(QAction("Show all panels", self, triggered=lambda: [x.setChecked(True) for x in wm.actions() if x.isCheckable()]))
@@ -616,6 +626,25 @@ class Main(QMainWindow):
         import numpy as np
         mask = d.selection.mask if d.selection is not None else np.full((d.h, d.w), 255, np.uint8)
         fill_mask(self.canvas, "Fill", mask, QColor(self.state.fg))
+
+    def fill_back(self):
+        from imgkit.tools import fill_mask
+        import numpy as np
+        d = self.cur_doc()
+        mask = d.selection.mask if d.selection is not None else np.full((d.h, d.w), 255, np.uint8)
+        fill_mask(self.canvas, "Fill", mask, QColor(self.state.bg))
+
+    def _deselect(self):
+        d = self.cur_doc()
+        if d is not None and d.selection is not None:
+            d._last_selection = d.selection              # for Reselect (Ctrl+Shift+D)
+        self.sel_set(lambda d: None, "Deselect")
+
+    def _reselect(self):
+        d = self.cur_doc()
+        last = getattr(d, "_last_selection", None) if d is not None else None
+        if last is not None:
+            self.sel_set(lambda d: last, "Reselect")
 
     def sel_set(self, fn, label):
         d = self.cur_doc()

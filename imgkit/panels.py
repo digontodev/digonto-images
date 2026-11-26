@@ -1,6 +1,6 @@
 """Side panels: Navigator, Colour, Layers, History, and the tool options bar."""
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QCursor, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QFileDialog, QMenu, QGroupBox, QMessageBox, QCheckBox, QColorDialog, QComboBox, QFontComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QPushButton, QSlider, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
@@ -268,6 +268,7 @@ class LayersPanel(QWidget):
         self.list.setIconSize(QSize(44, 44))
         self.list.setSpacing(1)
         self.list.currentRowChanged.connect(self._select)
+        self.list.itemClicked.connect(self._clicked)
         self.list.itemChanged.connect(self._vis)
         self.list.itemDoubleClicked.connect(self._rename)
         self.list.setDragDropMode(QAbstractItemView.InternalMove)       # drag a layer up or down
@@ -305,6 +306,11 @@ class LayersPanel(QWidget):
         self.fx_btn.setToolTip("Layer style: shadow, glow, outline, colour overlay")
         self.fx_btn.clicked.connect(self._style)
         row2.addWidget(self.fx_btn)
+        self.clip_btn = QToolButton()
+        self.clip_btn.setText("↳ Clip")
+        self.clip_btn.setToolTip("Clipping mask (Ctrl+Alt+G): this layer only shows inside the layer below")
+        self.clip_btn.clicked.connect(lambda: self._do(ops.toggle_clip))
+        row2.addWidget(self.clip_btn)
         self.adj_btn = QToolButton()
         self.adj_btn.setText("Adjustment ▾")
         self.adj_btn.setPopupMode(QToolButton.InstantPopup)
@@ -383,10 +389,18 @@ class LayersPanel(QWidget):
         self._busy = True
         self.list.clear()
         if d is not None:
+            folded = {l.gid for l in d.layers if l.is_group and l.collapsed}
             for i in range(len(d.layers) - 1, -1, -1):
                 L = d.layers[i]
-                it = QListWidgetItem(self._icon(L), ("◐  " if L.adj else "T  " if L.text else "") + L.name + ("  fx" if render.style_active(L.style) else "")
-                                     + ("  🔒" if L.locked else ""))
+                if L.parent in folded and not L.is_group:
+                    continue                                  # inside a folded group
+                if L.is_group:
+                    label = ("▸  " if L.collapsed else "▾  ") + "📁  " + L.name + (f"  {int(round(L.opacity * 100))} %" if L.opacity < 0.999 else "")
+                    it = QListWidgetItem(label)
+                    it.setToolTip("Group: click the arrow side twice to fold / unfold, double-click the name to rename")
+                else:
+                    it = QListWidgetItem(self._icon(L), ("      " if L.parent else "") + ("↳ " if getattr(L, "clip", False) else "") + ("◐  " if L.adj else "T  " if L.text else "") + L.name + ("  fx" if render.style_active(L.style) else "")
+                                         + ("  🔒" if L.locked else "") + ("  ▣ smart" if L.smart else ""))
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
                 it.setCheckState(Qt.Checked if L.visible else Qt.Unchecked)
                 it.setData(Qt.UserRole, i)
@@ -418,8 +432,10 @@ class LayersPanel(QWidget):
             return
         order = [self.list.item(r).data(Qt.UserRole) for r in range(self.list.count())]       # top first
         old = list(d.layers)
-        if sorted(order) == list(range(len(old))):
-            ops.reorder_layers(d, [old[i] for i in reversed(order)])
+        if len(set(order)) == len(order) and all(0 <= i < len(old) for i in order):
+            new = [old[i] for i in reversed(order)]
+            new += [l for l in old if l not in new]           # layers of folded groups: tidy_groups puts them back under their group
+            ops.reorder_layers(d, new)
         QTimer.singleShot(0, self.rebuild)
 
     def _select(self, row):
@@ -430,6 +446,16 @@ class LayersPanel(QWidget):
         if i != d.active:
             d.set_active(i)
             self.rebuild()
+
+    def _clicked(self, it):
+        """a click on the arrow of a group folds or unfolds it"""
+        d = self.get_doc()
+        if d is None or self._busy:
+            return
+        i = it.data(Qt.UserRole)
+        if 0 <= i < len(d.layers) and d.layers[i].is_group and self.list.viewport().mapFromGlobal(QCursor.pos()).x() < 40:
+            d.layers[i].collapsed = not d.layers[i].collapsed
+            QTimer.singleShot(0, self.rebuild)
 
     def _vis(self, it):
         d = self.get_doc()
@@ -445,6 +471,8 @@ class LayersPanel(QWidget):
         d = self.get_doc()
         from PySide6.QtWidgets import QInputDialog
         i = it.data(Qt.UserRole)
+        if d.layers[i].is_group and self.list.viewport().mapFromGlobal(QCursor.pos()).x() < 40:
+            return                                            # a double click on the arrow only folds
         if d.layers[i].adj and adjlayers.KINDS[d.layers[i].adj["kind"]][1]:
             d.set_active(i)
             fx.AdjustLayerDialog(self.window(), d, d.layers[i]).exec()
@@ -600,6 +628,8 @@ class OptionsBar(QWidget):
         W["grad_mode"] = combo("grad_mode", [("fg-bg", "Front to back"), ("fg-clear", "Front to clear")])
         W["grad_preset"] = self._grad_preset(lay)
         W["brush_preset"] = self._brush_preset(lay)
+        W["tool_preset"] = self._tool_preset(lay)
+        W["pen_actions"] = self._pen_actions(lay)
         self.W = W
         self.hint = QLabel("")
         self.hint.setStyleSheet("color:#6A7A72;")
@@ -631,6 +661,98 @@ class OptionsBar(QWidget):
         self.s.changed.connect(lambda n: n == "brush_presets" and self._fill_brushes())
         self._fill_brushes()
         return w
+
+    def _pen_actions(self, lay):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(QLabel("Path →"))
+        for t, fn, tip in (("Selection", "to_selection", "Make a selection from the path (Enter)"), ("Fill", "fill", "Fill the path with the front colour"),
+                           ("Stroke", "stroke", "Draw along the path with the brush size and front colour")):
+            b = QToolButton(); b.setText(t); b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, f=fn: self._pen_do(f))
+            h.addWidget(b)
+        lay.addWidget(w)
+        return w
+
+    def _pen_do(self, fn):
+        from .tools import TOOLS
+        win = self.window()
+        c = getattr(win, "canvas", None) or (win.cur_canvas() if hasattr(win, "cur_canvas") else None)
+        if c is not None:
+            getattr(TOOLS["pen"], fn)(c)
+
+    # ---- tool presets (as in Photoshop): size, hardness, opacity and tip saved under a name
+    def _tool_preset(self, lay):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(QLabel("Preset"))
+        self.tpcb = QComboBox()
+        self.tpcb.setMinimumWidth(130)
+        self.tpcb.activated.connect(self._tool_preset_pick)
+        h.addWidget(self.tpcb)
+        b = QToolButton(); b.setText("Save…"); b.setToolTip("Save the current brush settings under a name"); b.clicked.connect(self._tool_preset_save)
+        h.addWidget(b)
+        x = QToolButton(); x.setText("✕"); x.setToolTip("Delete the chosen preset"); x.clicked.connect(self._tool_preset_delete)
+        h.addWidget(x)
+        lay.addWidget(w)
+        self._fill_tool_presets()
+        return w
+
+    @staticmethod
+    def _tp_load():
+        import json
+        from PySide6.QtCore import QSettings
+        try:
+            return json.loads(QSettings("Digonto", "Images").value("presets/tool_presets", "[]") or "[]")
+        except Exception:
+            return []
+
+    @staticmethod
+    def _tp_store(items):
+        import json
+        from PySide6.QtCore import QSettings
+        QSettings("Digonto", "Images").setValue("presets/tool_presets", json.dumps(items))
+
+    def _fill_tool_presets(self):
+        self.tpcb.blockSignals(True)
+        self.tpcb.clear()
+        self.tpcb.addItem("—")
+        for p in self._tp_load():
+            self.tpcb.addItem(f"{p['name']}  ({p['size']} px)")
+        self.tpcb.blockSignals(False)
+
+    def _tool_preset_pick(self, i):
+        items = self._tp_load()
+        if i <= 0 or i > len(items):
+            return
+        p = items[i - 1]
+        self.s.set(size=int(p["size"]), hardness=int(p["hardness"]), opacity=int(p["opacity"]))
+        tip = p.get("tip")
+        self.s.tip = next((t for t in self.s.brush_presets if t["name"] == tip), None) if tip else None
+        self.s.changed.emit("tip")
+        self.s.changed.emit("brush_presets")
+
+    def _tool_preset_save(self):
+        from PySide6.QtWidgets import QInputDialog
+        n, ok = QInputDialog.getText(self, "Save preset", "Name:", text=f"Brush {self.s.size} px")
+        if not ok or not n.strip():
+            return
+        items = [p for p in self._tp_load() if p["name"] != n.strip()]
+        items.append(dict(name=n.strip(), size=self.s.size, hardness=self.s.hardness, opacity=self.s.opacity,
+                          tip=self.s.tip["name"] if self.s.tip else None))
+        self._tp_store(items)
+        self._fill_tool_presets()
+        self.tpcb.setCurrentIndex(len(items))
+
+    def _tool_preset_delete(self):
+        i = self.tpcb.currentIndex()
+        items = self._tp_load()
+        if 0 < i <= len(items):
+            del items[i - 1]
+            self._tp_store(items)
+            self._fill_tool_presets()
 
     def _fill_brushes(self):
         from . import arr
@@ -722,7 +844,7 @@ class OptionsBar(QWidget):
         st.setValue("presets/gradients", list({*(old if isinstance(old, list) else []), f}))
 
     SHOW = {
-        "brush": ["brush_preset", "size", "hardness", "opacity"], "eraser": ["size", "hardness", "opacity"],
+        "brush": ["tool_preset", "brush_preset", "size", "hardness", "opacity"], "eraser": ["tool_preset", "size", "hardness", "opacity"],
         "fill": ["tolerance", "contiguous", "sample_layer", "opacity"], "wand": ["tolerance", "contiguous", "sample_layer", "feather"],
         "select": ["sel_kind", "radius", "feather"], "shape": ["shape", "fill", "stroke", "stroke_w", "radius", "opacity"],
         "gradient": ["grad_preset", "grad", "opacity"],
@@ -730,10 +852,12 @@ class OptionsBar(QWidget):
         "clone": ["size", "hardness", "opacity", "sample_layer"], "heal": ["size", "hardness", "opacity", "sample_layer"], "spot": ["size", "sample_layer"],
         "smudge": ["size", "hardness", "opacity"], "blurbrush": ["size", "hardness", "opacity"], "sharpenbrush": ["size", "hardness", "opacity"],
         "dodge": ["size", "hardness", "opacity"], "burn": ["size", "hardness", "opacity"], "eyedropper": ["sample_layer"], "move": [], "crop": [], "text": [], "hand": [], "zoom": [],
+        "pen": ["pen_actions", "size", "opacity", "feather"],
     }
     HINT = {
         "move": "Drag to move the layer. Arrow keys nudge (Shift = 10 px).", "crop": "Drag the area to keep, Enter = crop, Esc = cancel.",
-        "text": "Click on the picture to type.", "select": "Shift = add, Alt = subtract, click = deselect. Polygon: click points, double-click or Enter to finish.",
+        "text": "Click on the picture to type.",
+        "pen": "Click = corner point, drag = curve, click the first point to close. Enter = selection, Backspace = undo point, Esc = clear.", "select": "Shift = add, Alt = subtract, click = deselect. Polygon: click points, double-click or Enter to finish.",
         "wand": "Shift = add, Alt = subtract.", "eyedropper": "Click = front colour, Alt-click = back colour.",
         "hand": "Drag to move around. Space does the same in any tool.", "zoom": "Click = zoom in, Alt-click = zoom out.",
         "quickselect": "Paint over the object; it grows over similar colours. Alt = take away.",

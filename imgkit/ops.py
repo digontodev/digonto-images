@@ -104,12 +104,15 @@ def transform_layer(doc, scale=100.0, angle=0.0, sx=None, sy=None):
 
 def duplicate_layer(doc):
     l = doc.layer()
+    if l.is_group:
+        return duplicate_group(doc)
     with doc.edit("Duplicate layer"):
         n = Layer(l._image.copy(), l.name + " copy", l.x, l.y)
         n.opacity, n.blend, n.visible = l.opacity, l.blend, l.visible
         n._mask = l._mask.copy() if l._mask is not None else None
-        n.mask_on, n.style, n.adj = l.mask_on, copy.deepcopy(l.style), copy.deepcopy(l.adj)
+        n.mask_on, n.style, n.adj, n.clip = l.mask_on, copy.deepcopy(l.style), copy.deepcopy(l.adj), l.clip
         n.text = dict(l.text) if l.text else None
+        n.parent = l.parent
         doc.layers.insert(doc.active + 1, n)
         doc.active += 1
 
@@ -117,6 +120,8 @@ def duplicate_layer(doc):
 def delete_layer(doc):
     if len(doc.layers) <= 1:
         return
+    if doc.layer().is_group:
+        return delete_group(doc)
     with doc.edit("Delete layer"):
         del doc.layers[doc.active]
         doc.active = max(0, min(doc.active, len(doc.layers) - 1))
@@ -128,12 +133,152 @@ def add_layer(doc, name=None):
 
 
 def move_layer(doc, delta):
-    i, j = doc.active, doc.active + delta
-    if not (0 <= j < len(doc.layers)):
+    """one step up (+1) or down (-1). A group moves with all its layers; a layer stays inside its group."""
+    L = doc.layer()
+    lo, hi = block(doc, doc.active)
+    order = list(doc.layers)
+    if L.parent and not L.is_group:            # inside a group: move within it
+        g_lo, g_hi = block(doc, group_index(doc, L.parent))
+        j = doc.active + delta
+        if not (g_lo <= j < g_hi):
+            return
+        with doc.edit("Reorder layers"):
+            doc.layers[doc.active], doc.layers[j] = doc.layers[j], doc.layers[doc.active]
+            doc.active = j
         return
+    chunk = order[lo:hi + 1]
+    rest = order[:lo] + order[hi + 1:]
+    # neighbour block above (delta +1) or below (-1), a whole group counts as one
+    if delta > 0:
+        if hi + 1 >= len(order):
+            return
+        n_lo, n_hi = block(doc, hi + 1)
+        pos = n_hi - len(chunk) + 1
+    else:
+        if lo - 1 < 0:
+            return
+        n_lo, n_hi = block(doc, lo - 1)
+        pos = n_lo
     with doc.edit("Reorder layers"):
-        doc.layers[i], doc.layers[j] = doc.layers[j], doc.layers[i]
-        doc.active = j
+        doc.layers[:] = rest[:pos] + chunk + rest[pos:]
+        doc.active = doc.layers.index(L)
+
+
+# ---------------------------------------------------------------- layer groups
+def group_index(doc, gid):
+    for k, l in enumerate(doc.layers):
+        if l.is_group and l.gid == gid:
+            return k
+    return -1
+
+
+def block(doc, i):
+    """index range (lo, hi) that moves together with layer i: a group with its members, or the layer alone"""
+    l = doc.layers[i]
+    if l.parent and not l.is_group:
+        gi = group_index(doc, l.parent)
+        if gi < 0:
+            return i, i
+        l, i = doc.layers[gi], gi
+    if l.is_group:
+        lo = i
+        while lo - 1 >= 0 and doc.layers[lo - 1].parent == l.gid:
+            lo -= 1
+        return lo, i
+    return i, i
+
+
+def tidy_groups(doc):
+    doc.tidy_groups()
+
+
+def group_layers(doc, layers=None):
+    """Ctrl+G (as in Photoshop): put the active layer (or the given layers) into a new group"""
+    import uuid
+    layers = [l for l in (layers or [doc.layer()]) if l is not None]
+    if not layers:
+        return False
+    if any(l.is_group or l.parent for l in layers):
+        return False                                   # groups inside groups: not yet
+    act = doc.layer()
+    with doc.edit("Group layers"):
+        gid = uuid.uuid4().hex[:10]
+        top = max(doc.layers.index(l) for l in layers)
+        head = Layer(arr.new_image(1, 1), f"Group {sum(1 for l in doc.layers if l.is_group) + 1}")
+        head.is_group, head.gid = True, gid
+        for l in layers:
+            l.parent = gid
+        doc.layers.insert(top + 1, head)
+        tidy_groups(doc)
+        doc.active = doc.layers.index(act if act in layers else head)
+    return True
+
+
+def ungroup(doc):
+    """Ctrl+Shift+G: the group goes, its layers stay where they are"""
+    l = doc.layer()
+    gid = l.gid if l.is_group else l.parent
+    gi = group_index(doc, gid) if gid else -1
+    if gi < 0:
+        return False
+    head = doc.layers[gi]
+    keep = l if not l.is_group else (doc.layers[gi - 1] if gi > 0 else None)
+    with doc.edit("Ungroup layers"):
+        for m in doc.layers:
+            if m.parent == gid:
+                m.parent = None
+                if head.opacity < 0.999:            # the group's opacity goes into its layers
+                    m.opacity *= head.opacity
+                if not head.visible:
+                    m.visible = False
+        doc.layers.remove(head)
+        doc.active = doc.layers.index(keep) if keep in doc.layers else max(0, min(gi, len(doc.layers) - 1))
+    return True
+
+
+def delete_group(doc):
+    lo, hi = block(doc, doc.active)
+    if hi - lo + 1 >= len(doc.layers):
+        return
+    with doc.edit("Delete group"):
+        del doc.layers[lo:hi + 1]
+        doc.active = max(0, min(lo, len(doc.layers) - 1))
+
+
+def duplicate_group(doc):
+    import uuid
+    lo, hi = block(doc, doc.active)
+    gid = uuid.uuid4().hex[:10]
+    with doc.edit("Duplicate group"):
+        new = []
+        for l in doc.layers[lo:hi + 1]:
+            n = copy.copy(l)
+            n._image = l._image.copy()
+            n._mask = l._mask.copy() if l._mask is not None else None
+            n.style, n.adj, n.text = copy.deepcopy(l.style), copy.deepcopy(l.adj), copy.deepcopy(l.text)
+            if l.is_group:
+                n.gid, n.name = gid, l.name + " copy"
+            else:
+                n.parent = gid
+            new.append(n)
+        doc.layers[hi + 1:hi + 1] = new
+        doc.active = hi + len(new)
+
+
+def merge_group(doc):
+    """a group becomes one picture layer (Ctrl+E on a group, as in Photoshop)"""
+    lo, hi = block(doc, doc.active)
+    head = doc.layers[hi]
+    members = doc.layers[lo:hi]
+    with doc.edit("Merge group", whole=True):
+        img = arr.new_image(doc.w, doc.h)
+        vis, head.visible = head.visible, True
+        doc.composite(img, members + [head], QRect(0, 0, doc.w, doc.h))
+        head.visible = vis
+        n = Layer(img, head.name, 0, 0)
+        n.visible = vis
+        doc.layers[lo:hi + 1] = [n]
+        doc.active = lo
 
 
 def _proxy(l, dx, dy):
@@ -146,7 +291,11 @@ def _proxy(l, dx, dy):
 def merge_down(doc):
     from . import adjlayers, render
     from .doc import _MODES
+    if doc.layer().is_group:
+        return merge_group(doc)
     i = doc.active
+    if doc.layers[i].parent != (doc.layers[i - 1].parent if i > 0 else None) or (i > 0 and doc.layers[i - 1].is_group):
+        return                                         # merge down only inside the same group
     if i <= 0:
         return
     top, low = doc.layers[i], doc.layers[i - 1]
@@ -162,6 +311,8 @@ def merge_down(doc):
             a = arr.to_array(out)
             res = adjlayers.apply(top.adj, a)
             k = np.full(a.shape[:2], top.opacity, np.float32)[..., None]
+            if top._mask is not None and top.mask_on:
+                k = k * render._region_array(top._mask, r, top.x, top.y)[..., :1]
             res = (a * (1 - k) + res * k).astype(np.uint8)
             res[..., 3] = a[..., 3]
             out = arr.from_array(res)
@@ -171,9 +322,12 @@ def merge_down(doc):
             mar = max(render.style_margin(low.style), render.style_margin(top.style)) if top.visible else render.style_margin(low.style)
             r = r.adjusted(-mar, -mar, mar, mar)
             out = arr.new_image(r.width(), r.height())
-            for l in (low, top):
-                if l.visible:
-                    render.draw_layer(out, _proxy(l, -r.x(), -r.y()), QRect(0, 0, r.width(), r.height()), _MODES)
+            whole = QRect(0, 0, r.width(), r.height())
+            if low.visible:
+                render.draw_layer(out, _proxy(low, -r.x(), -r.y()), whole, _MODES)
+            if top.visible:
+                alpha = render.base_alpha(_proxy(low, -r.x(), -r.y()), whole) if top.clip else None    # clipped: only inside the layer below
+                render.draw_layer(out, _proxy(top, -r.x(), -r.y()), whole, _MODES, clip_alpha=alpha)
             low._image, low._mask, low.edit_mask, low.style, low.text = out, None, False, None, None
             low.x, low.y = r.x(), r.y()
         low.opacity, low.blend, low.mask_on = 1.0, "normal", True
@@ -312,7 +466,8 @@ def reorder_layers(doc, new_layers):
         return
     with doc.edit("Reorder layers"):
         doc.layers[:] = new_layers
-        doc.active = new_layers.index(active)
+        tidy_groups(doc)
+        doc.active = doc.layers.index(active)
 
 
 # ---------------------------------------------------------------- masks, styles, adjustment layers
@@ -440,3 +595,42 @@ def merge_visible(doc):
         keep.insert(pos, n)
         doc.layers[:] = keep
         doc.active = keep.index(n)
+
+
+def to_smart(doc):
+    """Convert to smart object: resizing and rotating are always made from the original pixels"""
+    l = doc.layer()
+    if l is None or l.is_group or l.adj or l.smart:
+        return False
+    with doc.edit("Convert to smart object", [], pixels=False):
+        l._smart_src = l._image.copy()
+        l.smart = dict(sx=1.0, sy=1.0, ang=0.0)
+    return True
+
+
+def rasterize(doc):
+    """a smart object (or text layer) becomes a normal picture layer"""
+    l = doc.layer()
+    if l is None or not (l.smart or l.text):
+        return False
+    with doc.edit("Rasterize layer", [], pixels=False):
+        l.smart, l.text = None, None
+    return True
+
+
+def toggle_clip(doc):
+    """clipping mask (Ctrl+Alt+G, as in Photoshop): the active layer only shows where the layer below has pixels"""
+    i = doc.active
+    l = doc.layer()
+    if l is None or i <= 0:
+        return False
+    with doc.edit("Release clipping mask" if l.clip else "Create clipping mask", [l], pixels=False):
+        l.clip = not l.clip
+    return True
+
+
+def duplicate_or_copy(doc):
+    """Ctrl+J as in Photoshop: with a selection a new layer from it, without one a copy of the whole layer"""
+    if doc.selection is not None and new_from_selection(doc, False):
+        return
+    duplicate_layer(doc)

@@ -116,16 +116,22 @@ def _styled(a, st):
     return out
 
 
-def draw_layer(target, l, rect, modes):
-    """draw layer l into the merged picture, only inside rect (doc coordinates)"""
+def draw_layer(target, l, rect, modes, off=None, clip_alpha=None):
+    """draw layer l into the merged picture, only inside rect (doc coordinates).
+    off: the target starts at this doc point (a part-picture); clip_alpha: clipping mask (float h x w for rect)"""
+    from PySide6.QtCore import QPoint
+    off = off or QPoint(0, 0)
     if l.adj:
-        return _adjustment(target, l, rect)
+        return _adjustment(target, l, rect, clip_alpha)
+    if clip_alpha is not None:
+        return _clipped(target, l, rect, modes, clip_alpha)
     st = l.style if style_active(l.style) else None
     mar = style_margin(st) if st else 0
     lr = l.rect().adjusted(-mar, -mar, mar, mar)
     if not lr.intersects(rect):
         return
     p = QPainter(target)
+    p.translate(-off.x(), -off.y())
     p.setClipRect(rect)
     p.setOpacity(l.opacity)
     p.setCompositionMode(modes.get(l.blend, QPainter.CompositionMode_SourceOver))
@@ -142,16 +148,38 @@ def draw_layer(target, l, rect, modes):
     p.end()
 
 
-def _adjustment(target, l, rect):
+def base_alpha(base, rect):
+    """how much of the base layer covers each pixel of rect (0..1): the shape a clipped layer is cut to"""
+    return np.clip(layer_pixels(base, rect)[..., 3] * base.opacity, 0, 1)
+
+
+def _clipped(target, l, rect, modes, alpha):
+    """clipping mask (as in Photoshop): the layer only shows where the layer below has pixels"""
+    tmp = arr.new_image(rect.width(), rect.height())
+    draw_layer(tmp, l, rect, {}, off=rect.topLeft())          # normal mode into the part-picture, opacity included
+    a = arr.to_array(tmp, straight=False).astype(np.float32) * alpha[..., None]
+    img = arr.from_array(np.clip(a + 0.5, 0, 255).astype(np.uint8), straight=False)
+    p = QPainter(target)
+    p.setClipRect(rect)
+    p.setCompositionMode(modes.get(l.blend, QPainter.CompositionMode_SourceOver))
+    p.drawImage(rect.x(), rect.y(), img)
+    p.end()
+
+
+def _adjustment(target, l, rect, clip_alpha=None):
     reg = rect.intersected(QRect(0, 0, target.width(), target.height()))
     if reg.isEmpty() or l.adj.get("kind") not in adjlayers.KINDS:
         return
+    if clip_alpha is not None and reg != rect:
+        clip_alpha = clip_alpha[reg.y() - rect.y():reg.y() - rect.y() + reg.height(), reg.x() - rect.x():reg.x() - rect.x() + reg.width()]
     sub = target.copy(reg)
     a = arr.to_array(sub)                              # straight RGBA
     res = adjlayers.apply(l.adj, a)
     k = np.full(a.shape[:2], l.opacity, np.float32)
     if l._mask is not None and l.mask_on:
         k = k * _region_array(l._mask, reg, l.x, l.y)[..., 0]
+    if clip_alpha is not None:
+        k = k * clip_alpha
     k = k[..., None]
     out = a.astype(np.float32) * (1 - k) + res.astype(np.float32) * k
     out[..., 3] = a[..., 3]
